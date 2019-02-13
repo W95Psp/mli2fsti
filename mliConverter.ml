@@ -4,28 +4,15 @@ open Location
 open Lexing
 open MFCore
 open MiscTools
-   
-let global_basedir = "/tmp/chose/"
-let global_outdir  = "/tmp/output_fsti/"
-let () =
-  Sys.command ("rm -rf " ^ global_outdir);
-  Sys.command ("mkdir " ^ global_outdir);
-  ()
-
-let file_modules: string list =
-  let isMLI x = Filename.extension x = ".mli" in
-  let l = Array.to_list (Sys.readdir global_basedir) in
-  List.map Filename.chop_extension (List.filter isMLI l)
-
-   
-let writeModuleItem (m: moduleItem)
+                                         
+let writeModuleItem opt (m: moduleItem)
   = let body = moduleItemToString m in
-    let oc = open_out (global_outdir ^ ldot m.mi_nname ^ ".fsti") in
+    let oc = open_out (opt.cOutdir ^ ldot m.mi_nname ^ ".fsti") in
     Printf.fprintf oc "%s" body;
     close_out oc
   
-let writeCreatedModules () =
-  let doubleUnderscore = emptyModule "DoubleUnderscore" None in
+let writeCreatedModules opt =
+  let doubleUnderscore = emptyModule opt "DoubleUnderscore" None in
   let addTypesTo dest = List.iter (fun t -> addRawChunks dest
                         [McDefinition ("type "^t)]) in
   addTypesTo doubleUnderscore
@@ -37,12 +24,12 @@ let writeCreatedModules () =
     ; "__"         ; "trivialMulDiscr"
     ; "mreg"       ; "loc"
     ];
-  let zarith = emptyModule "FastArithImpl.ZArith" None in
+  let zarith = emptyModule opt "FastArithImpl.ZArith" None in
   addTypesTo zarith ["t"];
   List.iter (fun mr ->
       printf "%s\n" ("Printing " ^ ldot !mr.mi_nname);
-      writeModuleItem !mr
-    ) !createdModules
+      writeModuleItem opt !mr
+    ) !(opt.cCreatedModules)
 
   
 let makeSubModuleSig (sur: moduleItem ref) (sign: signature) =
@@ -84,7 +71,8 @@ let module_with_add_stuff sub parentName =
   in addRawChunks sub [McDefinition (String.concat "\n" defs)];
      ()
   
-let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signature_item) =
+let rec addChunkToModule opt (filename: string) (self: moduleItem ref) (si: signature_item) =
+  let addChunkToModule = addChunkToModule opt in
   let addComment str =
     printf "\n\n #### %s \n\n" str;
     addRawChunks self [McComment str]
@@ -97,10 +85,6 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
   let si_desc = si.psig_desc in
   match si_desc with
   | Psig_open odesc ->
-     (* here, either:
-        - odesc refers to a file module, then we take the first chunk in path, and we generate "modules X = Y"s, then we go again
-        - odesc refers to a module accessible through some other open module. In that case, we juste look for a previous module statement in self
-      *)
      let lId = Longident.flatten odesc.popen_lid.txt in
      let sId = String.concat "." lId in
      let hId = List.hd lId in
@@ -124,11 +108,11 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
              (List.filter f_filter !m.mi_chunks))
      in
      let resolve_file () =
-       match List.find_opt ((=) hId) file_modules with
-       | Some mn -> (match List.find_opt (fun x -> hId = !x.mi_oname) !createdModules with
+       match List.find_opt ((=) hId) opt.cFileModules with
+       | Some mn -> (match List.find_opt (fun x -> hId = !x.mi_oname) !(opt.cCreatedModules) with
                      | Some readyMod -> resolve_explicit_module readyMod
                      | None -> (* the module is not loaded yet, let's do so *)
-                        let m = loadModuleFromFile mn in
+                        let m = loadModuleFromFile opt mn in
                         resolve_explicit_module m
                     )
        | None    -> ()
@@ -146,23 +130,22 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
   | Psig_module mdecl ->
      ( match mdecl.pmd_type.pmty_desc with
        | Pmty_signature body -> 
-          let previousStuff, op = externalizeChunksInSelf self in
+          let previousStuff, op = externalizeChunksInSelf opt self in
           let subName = mdecl.pmd_name.txt in
-          let sub = emptyModule subName (Some self) in
+          let sub = emptyModule opt subName (Some self) in
           addRawChunks sub op;
           addRawChunks self [McRename (true, subName, sub)];
-          addSignatureToModule filename sub body;
+          addSignatureToModule opt filename sub body;
           (* addRawChunks *) ()
        | Pmty_with (_, _) ->
-          let previousStuff, op = externalizeChunksInSelf self in
+          let previousStuff, op = externalizeChunksInSelf opt self in
           let subName = mdecl.pmd_name.txt in
-          let sub = emptyModule subName (Some self) in
+          let sub = emptyModule opt subName (Some self) in
           (* addRawChunks sub op; *)
           addRawChunks self [McRename (true, subName, sub)];
           let raw = getStringOf si in
           Str.search_forward (Str.regexp "^ +\\([^= ]+\\) with") raw 0;
           let parentName = String.trim (Str.matched_group 1 raw) in
-          printf "\nPARENT_NAME seen: %s\n" parentName;
           let re = Str.regexp "with +\\(type +[^=]+\\)" in
           let rec loop position =
             try
@@ -171,29 +154,15 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
               str :: (loop (position + 1))
             with _ -> []
           in
-          (* addRawChunks sub [McDefinition (String.concat "\n" (loop 0))]; *)
           module_with_add_stuff sub parentName;
           addRawChunks self [McRename (true, subName, sub)];
           ()
-          (* addSignatureToModule filename sub body; *)
-          (* addComment ("PMTY//"^mdecl.pmd_name.txt); () *)
        | _ -> ()
-          (* addComment ("PMTY//"^mdecl.pmd_name.txt); () *)
      )
   | Psig_modtype _ -> addComment "Warning: here, we had a _modtype_, we lost it."
   | Psig_recmodule _ -> addComment "Warning: here, we had a _recmodule_, we lost it."
   | _ ->
      let raw = String.trim (getStringOf si) in
-     let typesToHide = [
-         "ab_machine_env"
-       ; "ab_ideal_env"
-       ; "ab_ideal_nonrel"
-       ; "ab_ideal_env_nochan"
-       ; "mem_dom"
-       ; "coq_R_union"
-       ; "coq_R_diff"
-       ; "coq_R_inter"
-       ; "query_chan"] in
      let rec loopHide list = match list with
        | [] -> raw
        | hd::tl ->
@@ -203,8 +172,7 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
           then Str.matched_group 1 raw
           else loopHide tl
      in
-     let raw = loopHide typesToHide in
-     let valToRemove = ["assume"; "default"] in
+     let raw = loopHide opt.cTypesToHide in
      let rec loopRm list = match list with
        | [] -> Some raw
        | hd::tl ->
@@ -214,8 +182,9 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
           then None
           else loopRm tl
      in
-     match loopRm valToRemove with
+     match loopRm opt.cValToRemove with
      | Some raw ->
+        (* avoid too big tuples *)
         let x = "[a-zA-Z_.0-9\t\n ]+\\b *" in
         let x = String.concat "\\*" [x;x;x;x;x;x;x;x;x;x;x;x;x] in
         let raw = Str.global_replace
@@ -232,19 +201,19 @@ let rec addChunkToModule (filename: string) (self: moduleItem ref) (si: signatur
                     raw in
         addAString raw
      | None -> ()
-     
-and addSignatureToModule filename (self: moduleItem ref) (s: signature): unit
-  = List.iter (fun i -> addChunkToModule filename self i) s
-and loadModuleFromFile  (mn: string): moduleItem ref
+and addSignatureToModule opt filename (self: moduleItem ref) (s: signature): unit
+  = List.iter (fun i -> addChunkToModule opt filename self i) s
+and loadModuleFromFile opt (mn: string): moduleItem ref
   = printf "%s" ("loadModuleFromFile: " ^ mn ^ "\n");
-  match List.find_opt (fun x -> mn = !x.mi_oname) !createdModules with
+  match List.find_opt (fun x -> mn = !x.mi_oname) !(opt.cCreatedModules) with
   | Some readyMod -> readyMod
   | None -> 
-     let fn = global_basedir ^ mn ^ ".mli" in
+     let fn = opt.cBasedir ^ mn ^ ".mli" in
      let r = Pparse.parse_interface ~tool_name:"ocamlc" Format.err_formatter fn in
-     let self = emptyModule mn None in
-     addSignatureToModule fn self r;
+     let self = emptyModule opt mn None in
+     addSignatureToModule opt fn self r;
      self
+     
 let newDummyHasEqName =
   let _id = ref 0 in
   let f () = _id:=!_id + 1; "dummyHasEq"^string_of_int !_id in
@@ -254,24 +223,22 @@ let signatureToFile (tree: signature) fileout =
   let f = Format.formatter_of_out_channel fileout in
   Customprint.signature f tree;
   Format.pp_print_flush f
-let rearrangeOutput () =
+let rearrangeOutput opt =
   let f fn
-    = let ff = global_outdir ^ fn in
+    = let ff = opt.cOutdir ^ fn in
       let r  = Pparse.parse_interface ~tool_name:"ocamlc" Format.err_formatter ff in
-      (* Sys.command ("rm -f " ^ ff); *)
       let oc = open_out ff in
       let s = signatureToFile r oc in
       close_out oc
   in
   let f2 fn =
-    let ff = global_outdir ^ fn in
+    let ff = opt.cOutdir ^ fn in
     let lines = read_lines ff in
     let re = Str.regexp "val ppp\\([0-9]+\\) : int" in
     let lines = List.map (fun line ->
                     let l = String.trim line in
                     if Str.string_match re l 0
                     then let i = Str.matched_group 1 l in
-                         (* printf "\ni was %s\n" i; *)
                          List.nth !protected_strings (int_of_string i) ^ "(* recovered *)"
                     else (
                       let re = Str.regexp "^type +\\([^=]+\\)$" in
@@ -287,71 +254,80 @@ let rearrangeOutput () =
                         line
                     )
                   ) lines in
-    (* Sys.command ("rm -f " ^ ff); *)
     let oc = open_out ff in
     Printf.fprintf oc "%s" (String.concat "\n" lines);
     close_out oc
   in
   let isFSTI x = Filename.extension x = ".fsti" in
-  let l = Array.to_list (Sys.readdir global_outdir) in
+  let l = Array.to_list (Sys.readdir opt.cOutdir) in
   let l = (List.filter isFSTI l) in
   List.iter f l;
   List.iter f2 l
 
-(* let () =
- *      let raw = "type query_chan =\nasdsd" in
- *      let typesToHide = ["ab_machine_env"; "ab_ideal_env_nochan"; "mem_dom"; "ab_ideal_nonrel"; "query_chan"] in
- *      let rec loopHide list = match list with
- *        | [] -> raw
- *        | hd::tl ->
- *           let hd = Str.quote hd in
- *           printf "\n\nREGEX= %s" ("\\(type [^=]*" ^ hd ^ "\\) *=");
- *           let re = Str.regexp ("\\(type [^=]*" ^ hd ^ "\\) *=") in
- *           if Str.string_match re raw 0
- *           then Str.matched_group 1 raw
- *           else loopHide tl
- *      in
- *      let raw = loopHide typesToHide in
- *      if Str.string_match (Str.regexp_string "val assume") raw 0
- *      then ()
- *      else
- *        printf "%s" raw *)
-       
-  
-let () =
-  (* let all = List.map show_module ["Integers"] (\*file_modules*\) in *)
-  printf "## Begin\n";
-  List.iter (fun x -> loadModuleFromFile x; ()) file_modules;
-  (* loadModuleFromFile "Integers"; *)
-  writeCreatedModules ();
-  printf "## End\n";
-  (* read_line (); *)
-  rearrangeOutput ();
+
+
+let run opt =
+  Sys.command ("rm -rf " ^ opt.cOutdir);
+  Sys.command ("mkdir " ^ opt.cOutdir);
+  printf "Converting ocaml interfaces from %s to %s" ;
+  List.iter (fun x -> loadModuleFromFile opt x; ()) opt.cFileModules;
+  printf "Modules loaded. Writing modules..." ;
+  writeCreatedModules opt;
+  printf "Rearrange modules...";
+  rearrangeOutput opt;
+  printf "Done!";
   ()
-    
-(* let () =
- *   let re = Str.regexp "^txxxype +([^ =]+)[^=]*$" in
- *    let x = List.map (fun line ->
- *                     let l = String.trim line in
- *                     if Str.string_match re l 0
- *                     then let i = Str.matched_group 1 l in
- *                          (\* printf "\ni was %s\n" i; *\)
- *                          List.nth !protected_strings (int_of_string i) ^ "(\* recovered *\)"
- *                     else ( (\* TODO: turn every "type nalme p1 .. pn" into "assume ..." *\)
- *                       let re = Str.regexp "^type +\([^ =]+\)[^=]*$" in
- *                       if Str.string_match re l 0
- *                       then let i: string = Str.matched_group 0 l in
- *                            let k: string = Str.matched_group 1 l in
- *                              "assume new "
- *                            ^ i
- *                            ^ "\nval "
- *                            ^ newDummyHasEqName ()
- *                            ^ ": hasEq "^k^" \n"
- *                       else
- *                         line
- *                     )
- *      ) [
- *        "type hey"
- *              ] in
- *    printf "%s" (String.concat "\n" x);
- *    () *)
+
+let parsed_options =
+  let basedir = ref "" in
+  let outdir  = ref "" in
+  let app lst x =
+    lst := !lst @ List.map String.trim (String.split_on_char ',' x) in
+  let typesToHide: string list ref = ref [] in
+  let valToRemove: string list ref = ref [] in
+  let cliSpecs = [
+      "--input", Arg.Set_string basedir
+      , "input path to ocaml interfaces files"
+    ; "--output", Arg.Set_string outdir
+      , "output path for fstar interfaces"
+    ; "--hide-types", Arg.String (app typesToHide)
+      , "comma separated list of types to be hidden"
+    ; "--rm-vals", Arg.String (app valToRemove)
+      , "comma separated list of 'val' declarations to be removed"
+    ] in
+
+  let msg = "mliConverter: convert ocaml interface to fstar ones" in
+  Arg.parse cliSpecs (fun x -> raise (Arg.Bad ("Unknown option " ^ x))) msg;
+
+  if !basedir = "" or !outdir = ""
+  then (
+    printf "input and output are mandatory\n\n";
+    Arg.usage cliSpecs msg;
+    exit 0
+  );
+  
+  let l = Array.to_list (Sys.readdir !basedir) in
+  let opt = { cBasedir = !basedir
+            ; cOutdir =  !outdir
+            ; cFileModules = List.map Filename.chop_extension
+                               (List.filter isMLI l)
+            ; cCreatedModules = ref []
+            ; cValToRemove = !valToRemove
+            ; cTypesToHide = !typesToHide
+            }
+  in run opt
+
+
+
+(* ; cValToRemove = ["assume"; "default"]
+ *      ; cTypesToHide = [
+ *          "ab_machine_env"
+ *        ; "ab_ideal_env"
+ *        ; "ab_ideal_nonrel"
+ *        ; "ab_ideal_env_nochan"
+ *        ; "mem_dom"
+ *        ; "coq_R_union"
+ *        ; "coq_R_diff"
+ *        ; "coq_R_inter"
+ *        ; "query_chan"] *)
+       

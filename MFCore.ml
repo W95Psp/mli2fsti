@@ -1,5 +1,6 @@
 open MiscTools
 
+      
 type moduleChunk
   = McOpen       of moduleItem ref
   | McRename     of bool * string * moduleItem ref
@@ -12,6 +13,16 @@ and moduleItem
     ; mi_oname  : string
     ; mi_nname  : string list
     }
+
+type cOptions = {
+    cBasedir : string
+  ; cOutdir  : string
+  ; cFileModules : string list
+  ; cCreatedModules : moduleItem ref list ref
+  ; cValToRemove : string list
+  ; cTypesToHide : string list
+  }
+  
 let addRawChunks self chunks =
   self := { !self with mi_chunks = !self.mi_chunks @ chunks }
 let isMcOpen x
@@ -23,10 +34,9 @@ let isMcInclude x
 let isMcDefinition x
   = match x with McDefinition _ -> true | _ -> false
 
-let createdModules: moduleItem ref list ref = ref []
-let registerModule (m: moduleItem ref) = 
-    createdModules := m :: !createdModules; ()
-let emptyModule (oname: string) (parent: moduleItem ref option)
+let registerModule opt (m: moduleItem ref) = 
+    opt.cCreatedModules := m :: !(opt.cCreatedModules); ()
+let emptyModule opt (oname: string) (parent: moduleItem ref option)
   : moduleItem ref
   = let newModule =
       ref { mi_chunks = []
@@ -36,7 +46,7 @@ let emptyModule (oname: string) (parent: moduleItem ref option)
                        | Some p -> (@) !p.mi_nname
                        | None   -> id) [oname]
         }
-    in registerModule newModule;
+    in registerModule opt newModule;
        newModule
 
 let patchDefinition x =
@@ -73,7 +83,7 @@ let getNewId =
   let _uid = ref 0 in
   (fun () -> _uid := !_uid + 1; !_uid)
   
-let externalizeChunksInSelf (self: moduleItem ref)
+let externalizeChunksInSelf opt (self: moduleItem ref)
   : moduleItem ref * moduleChunk list
   = let myId = getNewId () in
     let oname = "Chunk" ^ padding (string_of_int myId) 5 in
@@ -90,5 +100,5 @@ let externalizeChunksInSelf (self: moduleItem ref)
     self := { !self with
               mi_chunks = op @ [ McInclude (false, sub) ]
             };
-    registerModule sub;
+    registerModule opt sub;
     (sub, op')

@@ -47,4 +47,8 @@ let nth_line n filename =
         failwith "end of file reached"
   in
   aux 1
-    
+
+
+let extEq ext x = Filename.extension x = ext
+let isMLI x = Filename.extension x = ".mli"
+let isFSTI x = Filename.extension x = ".fsti"
